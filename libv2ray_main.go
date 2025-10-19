@@ -40,6 +40,7 @@ type CoreController struct {
 	coreMutex       sync.Mutex
 	coreInstance    *core.Instance
 	IsRunning       bool
+	fastDNSManager  *FastDNSManager
 }
 
 // CoreCallbackHandler defines interface for receiving callbacks and notifications from the core service
@@ -100,8 +101,17 @@ func NewCoreController(s CoreCallbackHandler) *CoreController {
 		log.Printf("Failed to register log handler: %v", err)
 	}
 
+	// Initialize FastDNS manager
+	fastDNSManager := NewFastDNSManager()
+	
+	// Try to initialize FastDNS with default resolvers
+	if err := InitGlobalFastDNS(); err != nil {
+		log.Printf("FastDNS initialization failed, falling back to standard DNS: %v", err)
+	}
+
 	return &CoreController{
 		CallbackHandler: s,
+		fastDNSManager:  fastDNSManager,
 	}
 }
 
@@ -194,6 +204,102 @@ func CheckVersionX() string {
 	return fmt.Sprintf("Lib v%d, Xray-core v%s", version, core.Version())
 }
 
+// FastDNS related methods
+
+// ResolveDomainFast resolves a domain using FastDNS for high-performance DNS resolution
+func (x *CoreController) ResolveDomainFast(domain string) ([]string, error) {
+	if x.fastDNSManager == nil {
+		return nil, errors.New("FastDNS manager not initialized")
+	}
+	
+	ips, err := x.fastDNSManager.ResolveDomain("cloudflare", domain)
+	if err != nil {
+		return nil, err
+	}
+	
+	var ipStrings []string
+	for _, ip := range ips {
+		ipStrings = append(ipStrings, ip.String())
+	}
+	
+	return ipStrings, nil
+}
+
+// MeasureDNSLatencyFast measures DNS resolution latency using FastDNS
+func (x *CoreController) MeasureDNSLatencyFast(domain string) (int64, error) {
+	if x.fastDNSManager == nil {
+		return -1, errors.New("FastDNS manager not initialized")
+	}
+	
+	latency, err := x.fastDNSManager.MeasureDNSLatency("cloudflare", domain)
+	if err != nil {
+		return -1, err
+	}
+	
+	return latency.Milliseconds(), nil
+}
+
+// IsFastDNSEnabled returns whether FastDNS is enabled and available
+func (x *CoreController) IsFastDNSEnabled() bool {
+	if x.fastDNSManager == nil {
+		return false
+	}
+	return x.fastDNSManager.IsEnabled()
+}
+
+// GetFastDNSResolverCount returns the number of active FastDNS resolvers
+func (x *CoreController) GetFastDNSResolverCount() int {
+	if x.fastDNSManager == nil {
+		return 0
+	}
+	return x.fastDNSManager.GetResolverCount()
+}
+
+// AddFastDNSResolver adds a new FastDNS resolver
+func (x *CoreController) AddFastDNSResolver(name string, resolverIP string) error {
+	if x.fastDNSManager == nil {
+		return errors.New("FastDNS manager not initialized")
+	}
+	return x.fastDNSManager.AddResolver(name, resolverIP)
+}
+
+// Global FastDNS functions for direct access
+
+// ResolveDomainFastGlobal resolves a domain using the global FastDNS manager
+func ResolveDomainFastGlobal(domain string) ([]string, error) {
+	manager := GetFastDNSManager()
+	if manager == nil {
+		return nil, errors.New("global FastDNS manager not initialized")
+	}
+	
+	ips, err := manager.ResolveDomain("cloudflare", domain)
+	if err != nil {
+		return nil, err
+	}
+	
+	var ipStrings []string
+	for _, ip := range ips {
+		ipStrings = append(ipStrings, ip.String())
+	}
+	
+	return ipStrings, nil
+}
+
+// MeasureDNSLatencyFastGlobal measures DNS latency using the global FastDNS manager
+func MeasureDNSLatencyFastGlobal(domain string) (int64, error) {
+	manager := GetFastDNSManager()
+	if manager == nil {
+		return -1, errors.New("global FastDNS manager not initialized")
+	}
+	
+	latency, err := manager.MeasureDNSLatency("cloudflare", domain)
+	if err != nil {
+		return -1, err
+	}
+	
+	return latency.Milliseconds(), nil
+}
+
 // doShutdown shuts down the Xray instance and cleans up resources
 func (x *CoreController) doShutdown() {
 	if x.coreInstance != nil {
@@ -204,6 +310,11 @@ func (x *CoreController) doShutdown() {
 	}
 	x.IsRunning = false
 	x.statsManager = nil
+	
+	// Close FastDNS resources
+	if x.fastDNSManager != nil {
+		x.fastDNSManager.Close()
+	}
 }
 
 // doStartLoop sets up and starts the Xray core
